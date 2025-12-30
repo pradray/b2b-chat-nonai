@@ -13,4 +13,4 @@ def chat():
 
 if __name__ == '__main__':
     print("Running Local Python Server on Port 5000...")
-    app.run(port=5000, debug=True)
+    app.run(port=5000)
