@@ -1,116 +1,206 @@
+"""
+B2B Chat - Lambda Function with Security & Architecture Improvements
+=====================================================================
+Changes made:
+1. Input sanitization (Security - HIGH)
+2. Restricted CORS origins (Security - HIGH)
+3. Service layer abstraction (Architecture)
+4. Logging middleware (Architecture)
+5. JSON validation (Security - LOW)
+"""
+
 import json
-from fuzzywuzzy import fuzz
-from fuzzywuzzy import process
+import re
+import logging
+from datetime import datetime
+from IntentService import IntentService
+from ResponseService import ResponseService
+from knowledgebase import INTENT_MAP, RESPONSE_MAP, FALLBACK_RESPONSE
+
+# ============================================
+# CONFIGURATION
+# ============================================
+
+# Logging setup (Architecture: Middleware Layer)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Security: Allowed origins (replace wildcard CORS)
+ALLOWED_ORIGINS = [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+    'http://localhost:3000',
+    # More production origins can be added here or loaded from environment variables
+    # 'https://yourdomain.com'
+]
+
+# Security: Input constraints
+MAX_MESSAGE_LENGTH = 500
+MIN_MESSAGE_LENGTH = 1
+
+# NLU: Confidence threshold for intent matching
+CONFIDENCE_THRESHOLD = 75
+
+# ============================================
+# SECURITY LAYER
+# ============================================
+
+def sanitize_input(text):
+    """
+    Security: Sanitize user input to prevent injection attacks.
+    - Validates input type
+    - Removes control characters
+    - Limits length
+    - Strips whitespace
+    """
+    if not isinstance(text, str):
+        logger.warning(f"Invalid input type: {type(text)}")
+        return ''
+    
+    # Remove control characters (ASCII 0-31 and 127-159)
+    cleaned = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+    
+    # Remove potential script tags (basic XSS prevention)
+    cleaned = re.sub(r'<[^>]*>', '', cleaned)
+    
+    # Limit length and strip whitespace
+    cleaned = cleaned[:MAX_MESSAGE_LENGTH].strip()
+    
+    return cleaned
+
+
+def validate_request_body(body):
+    """
+    Security: Validate JSON request structure.
+    Returns (is_valid, error_message)
+    """
+    if not isinstance(body, dict):
+        return False, "Invalid request format"
+    
+    if 'message' not in body:
+        return False, "Missing 'message' field"
+    
+    message = body.get('message', '')
+    if not isinstance(message, str):
+        return False, "Message must be a string"
+    
+    if len(message) < MIN_MESSAGE_LENGTH:
+        return False, "Message cannot be empty"
+    
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return False, f"Message exceeds {MAX_MESSAGE_LENGTH} characters"
+    
+    return True, None
+
+
+def get_cors_origin(event):
+    """
+    Security: Return allowed CORS origin instead of wildcard.
+    """
+    headers = event.get('headers', {}) or {}
+    origin = headers.get('origin', '') or headers.get('Origin', '')
+    
+    if origin in ALLOWED_ORIGINS:
+        return origin
+    
+    # Default to first allowed origin for local development
+    return ALLOWED_ORIGINS[0]
+
+
+# Initialize services
+intent_service = IntentService(INTENT_MAP)
+response_service = ResponseService(RESPONSE_MAP, FALLBACK_RESPONSE)
+
+
+# ============================================
+# MAIN HANDLER
+# ============================================
 
 def lambda_handler(event, context):
-    # 1. Parse Input
+    """
+    Main entry point for chat requests.
+    """
+    request_id = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    logger.info(f"[{request_id}] New request received")
+    
+    # Parse request body
     body = event.get('body', {})
     if isinstance(body, str):
-        body = json.loads(body)
-        
-    user_text = body.get('message', '').lower()
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError as e:
+            logger.error(f"[{request_id}] JSON parse error: {e}")
+            return build_response(
+                {"error": "Invalid JSON format"},
+                400,
+                event
+            )
     
-    # --- STEP 1: DEFINE INTENTS (Synonym Mapping) ---
-    # Mapping the user's potential inputs (including synonyms) to a specific Intent ID.
-    intent_map = {
-        # Navigation
-        "NAV_MARKETPLACE": ["marketplace", "market", "browse", "products", "items"],
-        "NAV_SUPPLIER":    ["supplier", "suppliers", "vendor", "manufacturer", "factory"],
-        "NAV_RFQ":         ["rfq", "request for quote", "bulk quote", "estimate"],
-        "NAV_QUOTE":       ["quote", "pricing", "cost estimation"], 
-        "NAV_LOGIN":       ["login", "sign in", "log in", "credentials"],
-        "NAV_REGISTER":    ["register", "signup", "sign up", "join", "create account"],
-
-        # Business Logic (15 core B2B keywords)
-        "INFO_MOQ":        ["moq", "minimum order", "min qty", "smallest order"],
-        "INFO_PRICE":      ["price", "cost", "rates", "pricing", "how much"],
-        "INFO_BULK":       ["bulk", "volume discount", "large order", "wholesale"],
-        "INFO_SHIPPING":   ["shipping", "freight", "transport", "delivery", "logistics"],
-        "INFO_TRACK":      ["track", "tracking", "status", "shipment"],
-        "INFO_INVOICE":    ["invoice", "bill", "receipt", "commercial invoice"],
-        "INFO_PAYMENT":    ["payment", "pay", "bank details", "wire transfer"],
-        "INFO_CREDIT":     ["credit", "payment terms", "net 30", "credit line"],
-        "INFO_CATALOG":    ["catalog", "brochure", "pdf", "product list"],
-        "INFO_RETURN":     ["return", "refund", "rma", "exchange", "damaged"],
-        "INFO_LEADTIME":   ["lead time", "how long", "turnaround", "wait time"],
-        "INFO_SAMPLE":     ["sample", "prototype", "test unit"],
-        "INFO_STOCK":      ["stock", "inventory", "available", "quantity on hand"],
-        "INFO_WARRANTY":   ["warranty", "guarantee", "repair"],
-        "INFO_CUSTOMS":    ["customs", "duty", "tax", "tariffs", "import"],
-
-        # Greetings & Help
-        "GREETING":        ["hello", "hi", "hey", "greetings", "good morning"],
-        "HELP":            ["help", "support", "assist", "stuck", "what can you do"]
-    }
-
-    # --- STEP 2: DEFINED RESPONSES ---
-    response_map = {
-        # Navigation
-        "NAV_MARKETPLACE": {"msg": "Opening the Wholesale Marketplace...", "act": "marketplace"},
-        "NAV_SUPPLIER":    {"msg": "Here is our list of verified manufacturers.", "act": "suppliers"},
-        "NAV_RFQ":         {"msg": "Opening the Bulk Request for Quote form.", "act": "rfq"},
-        "NAV_QUOTE":       {"msg": "Please fill out the RFQ form for custom pricing.", "act": "rfq"},
-        "NAV_LOGIN":       {"msg": "Redirecting to Partner Login...", "act": "login"},
-        "NAV_REGISTER":    {"msg": "New partners can register via the Login page.", "act": "login"},
-
-        # Business Logic
-        "INFO_MOQ":        {"msg": "Standard MOQ is 50 units. Custom runs require 500 units.", "act": None},
-        "INFO_PRICE":      {"msg": "Login to see Tier-1 wholesale pricing.", "act": "login"},
-        "INFO_BULK":       {"msg": "Orders >1000 units get a 15% volume discount.", "act": None},
-        "INFO_SHIPPING":   {"msg": "We ship FOB and EXW via Maersk or DHL.", "act": None},
-        "INFO_TRACK":      {"msg": "Enter your PO Number in the chat to track.", "act": None},
-        "INFO_INVOICE":    {"msg": "Invoices are emailed automatically upon dispatch.", "act": None},
-        "INFO_PAYMENT":    {"msg": "We accept Net-30, LC, and TT.", "act": None},
-        "INFO_CREDIT":     {"msg": "Apply for a credit line in your dashboard.", "act": None},
-        "INFO_CATALOG":    {"msg": "The Q4 Catalog is available in the 'Resources' tab.", "act": None},
-        "INFO_RETURN":     {"msg": "RMA requests are valid for 14 days post-delivery.", "act": None},
-        "INFO_LEADTIME":   {"msg": "Current manufacturing lead time is 14 days.", "act": None},
-        "INFO_SAMPLE":     {"msg": "Paid samples are available. Contact sales.", "act": None},
-        "INFO_STOCK":      {"msg": "Live inventory is updated every 4 hours.", "act": None},
-        "INFO_WARRANTY":   {"msg": "Industrial parts carry a 1-year manufacturer warranty.", "act": None},
-        "INFO_CUSTOMS":    {"msg": "Buyer is responsible for import duties.", "act": None},
-
-        # Greetings & Help
-        "GREETING":        {"msg": "Welcome to B2B Hub. How can I assist?", "act": None},
-        "HELP":            {"msg": "I can navigate you or answer questions about MOQ/Shipping.", "act": None}
-    }
-
-    # --- STEP 3: DETECT INTENT (Fuzzy Logic) ---
-    detected_intent = None
-    highest_score = 0
+    # Validate request
+    is_valid, error_msg = validate_request_body(body)
+    if not is_valid:
+        logger.warning(f"[{request_id}] Validation failed: {error_msg}")
+        return build_response(
+            {"error": error_msg},
+            400,
+            event
+        )
     
-    # Check user input against all synonyms in the intent_map
-    for intent, phrases in intent_map.items():
-        # process.extractOne finds the best match in the list of synonyms
-        best_match, score = process.extractOne(user_text, phrases, scorer=fuzz.partial_ratio)
-        
-        if score > highest_score:
-            highest_score = score
-            detected_intent = intent
-
-    # --- STEP 4: GENERATE RESPONSE ---
-    # Use a threshold (e.g., 75) to avoid false positives on random text
-    if detected_intent and highest_score >= 75:
-        data = response_map[detected_intent]
-        response_data = {
-            "message": data["msg"],
-            "action": data["act"],
-            "debug_intent": detected_intent
+    # Sanitize input
+    raw_text = body.get('message', '')
+    user_text = sanitize_input(raw_text)
+    
+    if not user_text:
+        logger.warning(f"[{request_id}] Empty message after sanitization")
+        return build_response(
+            {"message": "Please enter a valid message.", "action": None},
+            200,
+            event
+        )
+    
+    logger.info(f"[{request_id}] Processing: '{user_text[:50]}...'")
+    
+    # Detect intent
+    intent, confidence = intent_service.detect_intent(user_text)
+    logger.info(f"[{request_id}] Intent: {intent}, Confidence: {confidence}")
+    
+    # Generate response
+    response_data = response_service.get_response(intent)
+    
+    result = {
+        "message": response_data["msg"],
+        "action": response_data["act"],
+        "debug": {
+            "intent": intent,
+            "confidence": confidence,
+            "request_id": request_id
         }
-    else:
-        # Fallback for unrecognized inputs
-        response_data = {
-            "message": "I'm not sure about that. Please contact admin for advanced queries.",
-            "action": None
-        }
+    }
+    
+    logger.info(f"[{request_id}] Response sent: intent={intent}")
+    
+    return build_response(result, 200, event)
 
-    # --- STEP 5: RETURN RESPONSE ---
+
+def build_response(body, status_code, event):
+    """
+    Build HTTP response with security headers.
+    """
     return {
-        'statusCode': 200,
+        'statusCode': status_code,
         'headers': {
-            'Access-Control-Allow-Origin': '*',
+            'Content-Type': 'application/json',
+            'Access-Control-Allow-Origin': get_cors_origin(event),
             'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Allow-Methods': 'OPTIONS,POST'
+            'Access-Control-Allow-Methods': 'OPTIONS,POST',
+            'Access-Control-Allow-Credentials': 'true',
+            # Security headers
+            'X-Content-Type-Options': 'nosniff',
+            'X-Frame-Options': 'DENY',
+            'X-XSS-Protection': '1; mode=block'
         },
-        'body': json.dumps(response_data)
+        'body': json.dumps(body)
     }

@@ -4,6 +4,25 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- Security: Content Security Policy -->
+    <meta http-equiv="Content-Security-Policy" 
+          content="default-src 'self'; 
+                   script-src 'self' 'unsafe-inline' 'unsafe-eval'; 
+                   style-src 'self' 'unsafe-inline'; 
+                   connect-src 'self' http://127.0.0.1:5000 http://localhost:5000;
+                   img-src 'self' data:;
+                   font-src 'self';">
+    
+    <!-- Security: Additional headers via meta tags -->
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
+    
+    <!-- SEO & Accessibility -->
+    <meta name="description" content="Global B2B Hub - Wholesale Marketplace for Industrial Products">
+    <meta name="theme-color" content="#2980b9">
+    
     <title>Global B2B Hub</title>
   </head>
   <body>
